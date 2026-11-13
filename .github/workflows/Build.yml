@@ -1,0 +1,73 @@
+name: Universal Flutter Release Builder
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo_url:
+        description: 'Flutter GitHub Repo URL'
+        required: true
+        type: string
+      branch:
+        description: 'Branch'
+        required: true
+        default: 'main'
+        type: string
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Pull Target Flutter Repo
+        env:
+          TARGET_PAT: ${{ secrets.TARGET_PAT }}
+        run: |
+          REPO=$(echo "${{ inputs.repo_url }}" | xargs)
+          echo "REPO_HASH=$(printf '%s' "$REPO" | sha256sum | cut -c1-12)" >> "$GITHUB_ENV"
+
+          if [ -n "$TARGET_PAT" ] && [[ "$REPO" == https://* ]]; then
+            AUTH_REPO="https://x-access-token:${TARGET_PAT}@${REPO#https://}"
+          else
+            AUTH_REPO="$REPO"
+          fi
+
+          git clone --depth 1 --branch "${{ inputs.branch }}" -- "$AUTH_REPO" app
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - name: Set up Flutter (Cached)
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          cache: true
+
+      - name: Setup Gradle Cache (Free for Private Repos)
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-provider: basic
+
+      - name: Restore Project Build Cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            app/.dart_tool
+            app/build
+          key: flutter-${{ env.REPO_HASH }}-${{ hashFiles('app/pubspec.lock', 'app/android/app/build.gradle*') }}
+          restore-keys: |
+            flutter-${{ env.REPO_HASH }}-
+
+      - name: Build ARM64 Release APK
+        working-directory: app
+        run: |
+          flutter pub get
+          flutter build apk --release --target-platform android-arm64
+
+      - name: Upload Release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release-apk
+          path: app/build/app/outputs/flutter-apk/app-release.apk
+          retention-days: 5
