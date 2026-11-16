@@ -1,0 +1,135 @@
+name: Alokmoy Signed Release Builder
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo_url:
+        description: Flutter GitHub Repo URL
+        required: true
+        default: https://github.com/Noakhali135/alokmoy-app.git
+        type: string
+      branch:
+        description: Branch
+        required: true
+        default: arena/e4a5b703-alokmoy-app
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: Pull Flutter repository
+        shell: bash
+        env:
+          TARGET_PAT: ${{ secrets.TARGET_PAT }}
+          REPO_URL: ${{ inputs.repo_url }}
+          TARGET_BRANCH: ${{ inputs.branch }}
+        run: |
+          set -euo pipefail
+
+          case "$REPO_URL" in
+            https://github.com/*) ;;
+            *) echo "Use an HTTPS github.com repository URL"; exit 1 ;;
+          esac
+
+          if [ -n "$TARGET_PAT" ]; then
+            AUTH=$(printf 'x-access-token:%s' "$TARGET_PAT" | base64 -w 0)
+            echo "::add-mask::$AUTH"
+
+            git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $AUTH" \
+              clone --depth 1 --branch "$TARGET_BRANCH" \
+              -- "$REPO_URL" app
+          else
+            git clone --depth 1 --branch "$TARGET_BRANCH" \
+              -- "$REPO_URL" app
+          fi
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Restore permanent release signing key
+        shell: bash
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          test -n "$KEYSTORE_BASE64" || {
+            echo "Missing ANDROID_KEYSTORE_BASE64 secret"
+            exit 1
+          }
+
+          test -n "$KEYSTORE_PASSWORD" || {
+            echo "Missing ANDROID_KEYSTORE_PASSWORD secret"
+            exit 1
+          }
+
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode \
+            > app/android/app/alokmoy-release.jks
+
+          {
+            printf 'storePassword=%s\n' "$KEYSTORE_PASSWORD"
+            printf 'keyPassword=%s\n' "$KEYSTORE_PASSWORD"
+            printf 'keyAlias=alokmoy\n'
+            printf 'storeFile=alokmoy-release.jks\n'
+          } > app/android/key.properties
+
+          chmod 600 \
+            app/android/key.properties \
+            app/android/app/alokmoy-release.jks
+
+          keytool -list -v \
+            -keystore app/android/app/alokmoy-release.jks \
+            -storepass:env KEYSTORE_PASSWORD \
+            -alias alokmoy \
+            | grep -E 'SHA1:|SHA256:'
+
+      - name: Build signed ARM64 release APK
+        working-directory: app
+        shell: bash
+        env:
+          GOOGLE_WEB_CLIENT_ID: ${{ vars.GOOGLE_WEB_CLIENT_ID }}
+        run: |
+          set -euo pipefail
+
+          test -n "$GOOGLE_WEB_CLIENT_ID" || {
+            echo "Missing GOOGLE_WEB_CLIENT_ID repository variable"
+            exit 1
+          }
+
+          flutter pub get
+
+          flutter build apk \
+            --release \
+            --target-platform android-arm64 \
+            --dart-define=API_BASE_URL=https://modest-lime-jackal.165-101-188-2.cpanel.site \
+            --dart-define=GOOGLE_WEB_CLIENT_ID="$GOOGLE_WEB_CLIENT_ID"
+
+      - name: Remove private signing files
+        if: always()
+        shell: bash
+        run: |
+          rm -f \
+            app/android/key.properties \
+            app/android/app/alokmoy-release.jks
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: alokmoy-signed-release-apk
+          path: app/build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
+          retention-days: 5
