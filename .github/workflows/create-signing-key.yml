@@ -1,0 +1,59 @@
+name: Create Android Signing Key Once
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  create-key:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Generate private signing key and public fingerprints
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir signing-kit
+
+          PASSWORD=$(openssl rand -hex 24)
+          echo "::add-mask::$PASSWORD"
+
+          export KEY_PASSWORD="$PASSWORD"
+
+          keytool -genkeypair \
+            -keystore signing-kit/alokmoy-release.jks \
+            -storetype JKS \
+            -storepass:env KEY_PASSWORD \
+            -keypass:env KEY_PASSWORD \
+            -alias alokmoy \
+            -keyalg RSA \
+            -keysize 3072 \
+            -validity 10000 \
+            -dname "CN=Alokmoy"
+
+          base64 -w 0 signing-kit/alokmoy-release.jks \
+            > signing-kit/ANDROID_KEYSTORE_BASE64.txt
+
+          printf '%s' "$PASSWORD" \
+            > signing-kit/ANDROID_KEYSTORE_PASSWORD.txt
+
+          keytool -list -v \
+            -keystore signing-kit/alokmoy-release.jks \
+            -storepass:env KEY_PASSWORD \
+            -alias alokmoy \
+            > signing-kit/PUBLIC-FINGERPRINTS.txt
+
+          echo "Public certificate fingerprints:"
+          grep -E 'SHA1:|SHA256:' signing-kit/PUBLIC-FINGERPRINTS.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PRIVATE-alokmoy-signing-kit
+          path: signing-kit/
+          retention-days: 1
