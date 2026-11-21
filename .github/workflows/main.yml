@@ -4,14 +4,14 @@ on:
   workflow_dispatch:
     inputs:
       repo_url:
-        description: Flutter GitHub Repo URL
+        description: Flutter GitHub Repo URL (the .git URL, NOT a /tree/ link)
         required: true
         default: https://github.com/Noakhali135/alokmoy-app.git
         type: string
       branch:
         description: Branch
         required: true
-        default: arena/e4a5b703-alokmoy-app
+        default: arena/a34456a5-alokmoy-app
         type: string
 
 permissions:
@@ -32,9 +32,27 @@ jobs:
         run: |
           set -euo pipefail
 
+          # Accept only a plain HTTPS repo URL. Catch the common mistake of
+          # pasting a /tree/<sha>/<folder> browser link, which git cannot clone.
           case "$REPO_URL" in
             https://github.com/*) ;;
             *) echo "Use an HTTPS github.com repository URL"; exit 1 ;;
+          esac
+
+          case "$REPO_URL" in
+            */tree/*|*/blob/*|*/commit*|*/mobile*|*\ *|*%20*)
+              echo "::error title=Bad repo URL::'$REPO_URL' is a browser link, not a repository URL."
+              echo "Use https://github.com/<owner>/<repo>.git and put the branch in the 'branch' input."
+              exit 1
+              ;;
+          esac
+
+          case "$REPO_URL" in
+            *.git) ;;
+            *)
+              [[ "$REPO_URL" == */ ]] && REPO_URL="${REPO_URL%/}"
+              REPO_URL="${REPO_URL}.git"
+              ;;
           esac
 
           if [ -n "$TARGET_PAT" ]; then
@@ -48,6 +66,25 @@ jobs:
             git clone --depth 1 --branch "$TARGET_BRANCH" \
               -- "$REPO_URL" app
           fi
+
+      - name: Locate the Flutter project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # The Flutter project lives in Mobile app/ on the current branch.
+          # Fail here with a clear message instead of a confusing
+          # "No pubspec.yaml file found" from flutter.
+          if [ ! -f "app/Mobile app/pubspec.yaml" ]; then
+            echo "::error title=No Flutter project::Branch '${{ inputs.branch }}' has no 'Mobile app/pubspec.yaml'."
+            echo "Top level of the cloned branch:"
+            ls -a app
+            echo "This branch predates the Mobile app/ + Backend/ restructure, or has a different layout."
+            exit 1
+          fi
+
+          echo "Flutter project: app/Mobile app"
+          grep -E '^name:|^version:' "app/Mobile app/pubspec.yaml"
 
       - uses: actions/setup-java@v4
         with:
@@ -77,28 +114,31 @@ jobs:
             exit 1
           }
 
+          # Unchanged by the restructure: key.properties belongs to the android/
+          # project (rootProject.file("key.properties")) and the keystore path is
+          # resolved relative to android/app/.
           printf '%s' "$KEYSTORE_BASE64" | base64 --decode \
-            > app/android/app/alokmoy-release.jks
+            > app/Mobile\ app/android/app/alokmoy-release.jks
 
           {
             printf 'storePassword=%s\n' "$KEYSTORE_PASSWORD"
             printf 'keyPassword=%s\n' "$KEYSTORE_PASSWORD"
             printf 'keyAlias=alokmoy\n'
             printf 'storeFile=alokmoy-release.jks\n'
-          } > app/android/key.properties
+          } > "app/Mobile app/android/key.properties"
 
           chmod 600 \
-            app/android/key.properties \
-            app/android/app/alokmoy-release.jks
+            "app/Mobile app/android/key.properties" \
+            "app/Mobile app/android/app/alokmoy-release.jks"
 
           keytool -list -v \
-            -keystore app/android/app/alokmoy-release.jks \
+            -keystore "app/Mobile app/android/app/alokmoy-release.jks" \
             -storepass:env KEYSTORE_PASSWORD \
             -alias alokmoy \
             | grep -E 'SHA1:|SHA256:'
 
       - name: Build signed ARM64 release APK
-        working-directory: app
+        working-directory: app/Mobile app
         shell: bash
         env:
           GOOGLE_WEB_CLIENT_ID: ${{ vars.GOOGLE_WEB_CLIENT_ID }}
@@ -123,13 +163,13 @@ jobs:
         shell: bash
         run: |
           rm -f \
-            app/android/key.properties \
-            app/android/app/alokmoy-release.jks
+            "app/Mobile app/android/key.properties" \
+            "app/Mobile app/android/app/alokmoy-release.jks"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: alokmoy-signed-release-apk
-          path: app/build/app/outputs/flutter-apk/app-release.apk
+          path: app/Mobile app/build/app/outputs/flutter-apk/app-release.apk
           if-no-files-found: error
           retention-days: 5
